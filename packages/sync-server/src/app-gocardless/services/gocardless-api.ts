@@ -20,6 +20,19 @@ const debugSensitive = createDebug('actual-sensitive:gocardless');
 const BASE_URL = 'https://bankaccountdata.gocardless.com/api/v2';
 const ALLOWED_ORIGIN = new URL(BASE_URL).origin;
 
+/**
+ * Institutions whose GoCardless connector cannot finalize a requisition that
+ * references a pre-created end-user agreement: the GoCardless hosted page
+ * answers "Session expired / already authorized" and the requisition stays
+ * stuck in `UA` instead of reaching `LN`.
+ *
+ * For these institutions we skip the explicit agreement so GoCardless creates
+ * its default agreement inline with the requisition.
+ * See https://github.com/actualbudget/actual/issues/8902
+ */
+const INSTITUTIONS_WITHOUT_PRE_CREATED_AGREEMENT =
+  new Set<GoCardlessInstitutionId>(['ING_INGBITMM' as GoCardlessInstitutionId]);
+
 export type TokenResponse = {
   access: string;
   refresh: string;
@@ -221,7 +234,12 @@ export class GoCardlessApi {
   }: {
     redirectUrl: string;
     institutionId: GoCardlessInstitutionId;
-    agreement: GoCardlessAgreementId;
+    /**
+     * When omitted, GoCardless creates its default end-user agreement inline
+     * with the requisition. `#request` drops `undefined` values from the
+     * body, so the `agreement` field is simply not sent.
+     */
+    agreement?: GoCardlessAgreementId;
     userLanguage: string;
     reference: string | null;
     ssn: string | null;
@@ -338,16 +356,24 @@ export class GoCardlessApi {
     redirectImmediate?: boolean;
     accountSelection?: boolean;
   }): Promise<Requisition> {
-    const agreement = await this.createAgreement({
+    // Some institutions (e.g. ING_INGBITMM) cannot finalize a requisition
+    // that is bound to a pre-created agreement: it stays stuck in `UA`.
+    // Skip the explicit agreement for those so GoCardless creates its
+    // default agreement inline with the requisition instead.
+    const agreement = INSTITUTIONS_WITHOUT_PRE_CREATED_AGREEMENT.has(
       institutionId,
-      maxHistoricalDays: Number(maxHistoricalDays),
-      accessValidForDays: Number(accessValidForDays),
-    });
+    )
+      ? undefined
+      : await this.createAgreement({
+          institutionId,
+          maxHistoricalDays: Number(maxHistoricalDays),
+          accessValidForDays: Number(accessValidForDays),
+        });
 
     return this.createRequisition({
       redirectUrl,
       institutionId,
-      agreement: agreement.id,
+      agreement: agreement?.id,
       userLanguage,
       reference: referenceId,
       ssn,
